@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>简易 RSS 阅读器</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6; /* Tailwind gray-100 */
+        }
+        .feed-item:hover {
+            background-color: #e5e7eb; /* Tailwind gray-200 */
+        }
+        .article-item {
+            border-left: 4px solid #3b82f6; /* Tailwind blue-500 */
+        }
+        .article-item:hover {
+            border-left-color: #2563eb; /* Tailwind blue-600 */
+        }
+        /* Custom scrollbar for webkit browsers */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1; /* Tailwind coolGray-300 */
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8; /* Tailwind coolGray-400 */
+        }
+        .loader {
+            border: 4px solid #f3f3f3; /* Light grey */
+            border-top: 4px solid #3498db; /* Blue */
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="min-h-screen text-gray-800">
+    <div class="container mx-auto p-4 md:p-8 max-w-5xl">
+        <header class="mb-8 text-center">
+            <h1 class="text-4xl font-bold text-gray-700">简易 RSS 阅读器</h1>
+            <p class="text-gray-500 mt-2">添加和阅读您喜欢的 RSS 源</p>
+        </header>
+
+        <div id="messageArea" class="mb-4 p-3 rounded-lg text-sm text-center" role="alert" aria-live="assertive"></div>
+
+        <div id="loadingIndicator" class="hidden my-4">
+            <div class="loader"></div>
+            <p class="text-center text-gray-500 mt-2">加载中...</p>
+        </div>
+
+        <div class="grid md:grid-cols-3 gap-6">
+            <div class="md:col-span-1 bg-white p-6 rounded-xl shadow-lg">
+                <h2 class="text-2xl font-semibold mb-4 text-gray-700">管理 RSS 源</h2>
+                <div class="mb-6">
+                    <label for="rssUrlInput" class="block text-sm font-medium text-gray-600 mb-1">RSS 源 URL:</label>
+                    <input type="url" id="rssUrlInput" placeholder="例如: https://example.com/feed" class="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition duration-150">
+                    <button id="addFeedButton" class="mt-3 w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:shadow-lg transition duration-150 ease-in-out transform hover:scale-105">
+                        添加源
+                    </button>
+                </div>
+
+                <h3 class="text-xl font-semibold mb-3 text-gray-700">我的 RSS 源</h3>
+                <button id="refreshAllButton" class="w-full mb-4 bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-lg shadow-md hover:shadow-lg transition duration-150 ease-in-out transform hover:scale-105">
+                    全部刷新
+                </button>
+                <div id="feedList" class="space-y-2 max-h-96 overflow-y-auto pr-2">
+                    </div>
+            </div>
+
+            <div class="md:col-span-2 bg-white p-6 rounded-xl shadow-lg">
+                <h2 id="articlesTitle" class="text-2xl font-semibold mb-4 text-gray-700">文章列表</h2>
+                <div id="articleList" class="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto pr-2">
+                    <p class="text-gray-500 text-center py-10">请选择一个 RSS 源或刷新以查看文章。</p>
+                </div>
+            </div>
+        </div>
+
+        <footer class="mt-12 text-center text-sm text-gray-400">
+            <p>&copy; <span id="currentYear"></span> RSS 阅读器. 仅供演示.</p>
+            <p class="mt-1 text-xs"><strong>重要:</strong> 由于浏览器 CORS 策略限制, 直接从浏览器调用某些外部 API 可能会失败. </p>
+        </footer>
+    </div>
+
+    <script>
+        // --- Constants and Global State ---
+        const LIGHTHOUSE_API_URL = 'https://lighthouseapp.io/api/trpc/utils.feed.check';
+        let feeds = []; // Array of {id: number, url: string, name: string (optional, derived from feed)}
+        let articlesCache = {}; // Object to store articles: { "feed_url": [article_objects] }
+        let currentDisplayingFeedUrl = null; // To know which feed's articles are being shown
+
+        // --- DOM Elements ---
+        const rssUrlInput = document.getElementById('rssUrlInput');
+        const addFeedButton = document.getElementById('addFeedButton');
+        const feedListContainer = document.getElementById('feedList');
+        const articleListContainer = document.getElementById('articleList');
+        const articlesTitle = document.getElementById('articlesTitle');
+        const refreshAllButton = document.getElementById('refreshAllButton');
+        const messageArea = document.getElementById('messageArea');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        document.getElementById('currentYear').textContent = new Date().getFullYear();
+
+        // --- Utility Functions ---
+        function showMessage(message, type = 'info') {
+            messageArea.textContent = message;
+            messageArea.classList.remove('bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700', 'bg-blue-100', 'text-blue-700');
+            if (type === 'error') {
+                messageArea.classList.add('bg-red-100', 'text-red-700');
+            } else if (type === 'success') {
+                messageArea.classList.add('bg-green-100', 'text-green-700');
+            } else { // info
+                messageArea.classList.add('bg-blue-100', 'text-blue-700');
+            }
+            // Clear message after some time
+            setTimeout(() => {
+                messageArea.textContent = '';
+                messageArea.classList.remove('bg-red-100', 'text-red-700', 'bg-green-100', 'text-green-700', 'bg-blue-100', 'text-blue-700');
+            }, 5000);
+        }
+
+        function setLoading(isLoading) {
+            if (isLoading) {
+                loadingIndicator.classList.remove('hidden');
+            } else {
+                loadingIndicator.classList.add('hidden');
+            }
+        }
+
+        function formatDate(dateString) {
+            if (!dateString) return '未知日期';
+            try {
+                const date = new Date(dateString);
+                return date.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            } catch (e) {
+                return dateString; // Fallback to original string if parsing fails
+            }
+        }
+
+        // --- Local Storage Functions ---
+        function saveFeedsToLocalStorage() {
+            localStorage.setItem('rssFeeds', JSON.stringify(feeds));
+        }
+
+        function loadFeedsFromLocalStorage() {
+            const storedFeeds = localStorage.getItem('rssFeeds');
+            if (storedFeeds) {
+                feeds = JSON.parse(storedFeeds);
+            }
+        }
+
+        function saveArticlesToCache(feedUrl, articles) {
+            articlesCache[feedUrl] = articles;
+            localStorage.setItem('rssArticlesCache', JSON.stringify(articlesCache));
+        }
+
+        function loadArticlesFromCache() {
+            const storedCache = localStorage.getItem('rssArticlesCache');
+            if (storedCache) {
+                articlesCache = JSON.parse(storedCache);
+            }
+        }
+
+
+        // --- Feed Management Functions ---
+        function renderFeeds() {
+            feedListContainer.innerHTML = ''; // Clear existing list
+            if (feeds.length === 0) {
+                feedListContainer.innerHTML = '<p class="text-gray-500 text-sm">还没有添加 RSS 源。</p>';
+                return;
+            }
+            feeds.forEach(feed => {
+                const feedItem = document.createElement('div');
+                feedItem.className = 'feed-item p-3 border border-gray-200 rounded-lg flex justify-between items-center cursor-pointer transition-colors duration-150';
+                feedItem.setAttribute('data-feed-id', feed.id);
+                feedItem.setAttribute('data-feed-url', feed.url);
+
+                const feedNameDisplay = document.createElement('span');
+                feedNameDisplay.className = 'font-medium text-gray-700 truncate flex-grow mr-2';
+                feedNameDisplay.textContent = feed.name || feed.url;
+                feedNameDisplay.title = feed.url; // Show full URL on hover
+                feedItem.appendChild(feedNameDisplay);
+
+                feedItem.onclick = () => displayArticlesForFeed(feed.url, feed.name);
+
+                const buttonsWrapper = document.createElement('div');
+                buttonsWrapper.className = 'flex-shrink-0 space-x-2';
+
+                const refreshButton = document.createElement('button');
+                refreshButton.innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-blue-500 hover:text-blue-700" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4 2a1 1 0 011 1v2.101a7.002 7.002 0 0111.601 2.566 1 1 0 11-1.885.666A5.002 5.002 0 005.999 7H9a1 1 0 010 2H4a1 1 0 01-1-1V3a1 1 0 011-1zm1 RssFeed2 14a1 1 0 011-1h5.001a5.002 5.002 0 004.885-6.333 1 1 0 011.885-.666A7.002 7.002 0 014.399 15.899V17a1 1 0 11-2 0v-5a1 1 0 011-1z" clip-rule="evenodd" />
+                    </svg>`;
+                refreshButton.title = "刷新此源";
+                refreshButton.className = "p-1 rounded hover:bg-gray-300";
+                refreshButton.onclick = (e) => {
+                    e.stopPropagation(); // Prevent feed item click
+                    fetchArticles(feed, true);
+                };
+                buttonsWrapper.appendChild(refreshButton);
+
+                const deleteButton = document.createElement('button');
+                deleteButton.innerHTML = `
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-red-500 hover:text-red-700" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                    </svg>`;
+                deleteButton.title = "删除此源";
+                deleteButton.className = "p-1 rounded hover:bg-gray-300";
+                deleteButton.onclick = (e) => {
+                    e.stopPropagation(); // Prevent feed item click
+                    deleteFeed(feed.id);
+                };
+                buttonsWrapper.appendChild(deleteButton);
+                feedItem.appendChild(buttonsWrapper);
+                feedListContainer.appendChild(feedItem);
+            });
+        }
+
+        async function addFeed() {
+            const url = rssUrlInput.value.trim();
+            if (!url) {
+                showMessage('请输入 RSS 源 URL。', 'error');
+                return;
+            }
+            try {
+                // Basic URL validation
+                new URL(url);
+            } catch (_) {
+                showMessage('请输入有效的 URL。', 'error');
+                return;
+            }
+
+            if (feeds.some(feed => feed.url === url)) {
+                showMessage('此 RSS 源已存在。', 'error');
+                return;
+            }
+
+            const newFeed = { id: Date.now(), url: url, name: url }; // Placeholder name, will be updated after fetch
+            feeds.push(newFeed);
+            saveFeedsToLocalStorage();
+            renderFeeds();
+            rssUrlInput.value = '';
+            showMessage(`正在尝试添加并抓取 ${url}...`, 'info');
+            // Fetch articles for the new feed and update its name
+            await fetchArticles(newFeed, true, true); // isManualRefresh = true, isNewFeed = true
+        }
+
+        function deleteFeed(feedId) {
+            const feedToDelete = feeds.find(f => f.id === feedId);
+            if (feedToDelete && articlesCache[feedToDelete.url]) {
+                delete articlesCache[feedToDelete.url];
+                saveArticlesToCache(null, null); // This will re-save the entire cache object
+            }
+            feeds = feeds.filter(feed => feed.id !== feedId);
+            saveFeedsToLocalStorage();
+            renderFeeds();
+
+            // If the deleted feed's articles were being displayed, clear the article list
+            if (currentDisplayingFeedUrl === feedToDelete?.url) {
+                articleListContainer.innerHTML = '<p class="text-gray-500 text-center py-10">RSS 源已删除。请选择另一个源。</p>';
+                articlesTitle.textContent = '文章列表';
+                currentDisplayingFeedUrl = null;
+            }
+            showMessage('RSS 源已删除。', 'success');
+        }
+
+        // --- Article Fetching and Display Functions ---
+        async function fetchArticles(feed, isManualRefresh = false, isNewFeed = false) {
+            if (!feed || !feed.url) {
+                console.error("fetchArticles called with invalid feed object:", feed);
+                return;
+            }
+            setLoading(true);
+            showMessage(`正在抓取 ${feed.name || feed.url}...`, 'info');
+
+            const apiUrl = `${LIGHTHOUSE_API_URL}?batch=1&input=${encodeURIComponent(JSON.stringify({"0":{"json":{"url": feed.url, "useCache":false}}}))}`;
+
+            try {
+                const response = await fetch(apiUrl, { headers: { 'Accept': 'application/json' }});
+                if (!response.ok) {
+                    // Try to get more specific error from API if possible
+                    let errorData;
+                    try {
+                        errorData = await response.json();
+                    } catch (e) { /* ignore if response is not json */ }
+
+                    const errorMsg = errorData?.error?.message || `HTTP 错误: ${response.status} ${response.statusText}`;
+                    throw new Error(`抓取失败: ${errorMsg}`);
+                }
+                const data = await response.json();
+
+                // Navigate the complex structure
+                const feedData = data?.[0]?.result?.data?.json?.rssFeeds?.[0];
+
+                if (feedData && feedData.content) {
+                    const fetchedArticles = feedData.content.map(article => ({
+                        title: article.title,
+                        url: article.url,
+                        datePublished: article.datePublished,
+                        // description: article.description || '' // If available
+                    }));
+
+                    // Update feed name if it was a placeholder (e.g., for a new feed)
+                    const feedInState = feeds.find(f => f.id === feed.id);
+                    if (feedInState && (isNewFeed || feedInState.name === feedInState.url) && feedData.name) {
+                        feedInState.name = feedData.name;
+                        saveFeedsToLocalStorage();
+                        renderFeeds(); // Re-render to show updated name
+                    }
+                    
+                    saveArticlesToCache(feed.url, fetchedArticles);
+                    displayArticlesForFeed(feed.url, feedData.name || feed.name, fetchedArticles); // Pass articles directly
+                    showMessage(`已成功抓取 ${feedData.name || feed.url} 的 ${fetchedArticles.length} 篇文章。`, 'success');
+                } else {
+                    console.error("Unexpected API response structure:", data);
+                    throw new Error('抓取成功，但未找到文章数据或源信息。API 响应结构可能已更改。');
+                }
+
+            } catch (error) {
+                console.error('抓取 RSS 源时出错:', error);
+                showMessage(`抓取 ${feed.name || feed.url} 失败: ${error.message}`, 'error');
+                // If fetching fails, but we have cached articles, display them
+                if (articlesCache[feed.url]) {
+                     displayArticlesForFeed(feed.url, feed.name, articlesCache[feed.url]);
+                } else if (currentDisplayingFeedUrl === feed.url) { // If this was the feed being shown, clear it
+                    articleListContainer.innerHTML = `<p class="text-red-500 text-center py-10">无法加载文章: ${error.message}</p>`;
+                }
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        function displayArticlesForFeed(feedUrl, feedName, articlesToDisplay = null) {
+            currentDisplayingFeedUrl = feedUrl;
+            articlesTitle.textContent = `文章来自: ${feedName || feedUrl}`;
+            articleListContainer.innerHTML = ''; // Clear existing articles
+
+            const articles = articlesToDisplay || articlesCache[feedUrl];
+
+            if (!articles || articles.length === 0) {
+                if (articlesToDisplay === null) { // Only show "no articles in cache" if not explicitly passed empty
+                    articleListContainer.innerHTML = '<p class="text-gray-500 text-center py-10">此源没有缓存的文章。请尝试刷新。</p>';
+                } else {
+                     articleListContainer.innerHTML = '<p class="text-gray-500 text-center py-10">此源没有文章。</p>';
+                }
+                return;
+            }
+
+            articles.sort((a, b) => new Date(b.datePublished) - new Date(a.datePublished)); // Sort by newest first
+
+            articles.forEach(article => {
+                const articleItem = document.createElement('div');
+                articleItem.className = 'article-item bg-gray-50 p-4 rounded-lg shadow hover:shadow-md transition-shadow duration-150';
+
+                const titleLink = document.createElement('a');
+                titleLink.href = article.url;
+                titleLink.target = '_blank'; // Open in new tab
+                titleLink.rel = 'noopener noreferrer';
+                titleLink.className = 'text-lg font-semibold text-blue-600 hover:text-blue-800 hover:underline break-words';
+                titleLink.textContent = article.title || '无标题';
+                articleItem.appendChild(titleLink);
+
+                const datePublished = document.createElement('p');
+                datePublished.className = 'text-xs text-gray-500 mt-1';
+                datePublished.textContent = `发布于: ${formatDate(article.datePublished)}`;
+                articleItem.appendChild(datePublished);
+
+                // Optional: Add description if available and desired
+                // if (article.description) {
+                //     const description = document.createElement('p');
+                //     description.className = 'text-sm text-gray-600 mt-2 break-words';
+                //     description.textContent = article.description.substring(0, 150) + (article.description.length > 150 ? '...' : '');
+                //     articleItem.appendChild(description);
+                // }
+                articleListContainer.appendChild(articleItem);
+            });
+        }
+
+        async function refreshAllFeeds() {
+            if (feeds.length === 0) {
+                showMessage('没有 RSS 源可刷新。', 'info');
+                return;
+            }
+            setLoading(true);
+            showMessage('正在刷新所有 RSS 源...', 'info');
+            // Using Promise.all to fetch all feeds concurrently
+            const fetchPromises = feeds.map(feed => fetchArticles(feed, true).catch(e => {
+                 console.error(`Error refreshing ${feed.url}:`, e);
+                 // Optionally return an error status for this specific feed
+                 return { url: feed.url, status: 'failed', error: e.message };
+            }));
+
+            try {
+                await Promise.all(fetchPromises);
+                showMessage('所有 RSS 源刷新完毕。', 'success');
+            } catch (error) {
+                // This catch might not be strictly necessary if individual fetchArticles handle their errors
+                // and Promise.all is used with .catch on individual promises.
+                console.error("Error during refreshAllFeeds:", error);
+                showMessage('刷新部分源时遇到错误。', 'error');
+            } finally {
+                setLoading(false);
+                // Optionally, re-display articles for the currently selected feed if any
+                if (currentDisplayingFeedUrl && articlesCache[currentDisplayingFeedUrl]) {
+                    const currentFeed = feeds.find(f => f.url === currentDisplayingFeedUrl);
+                    displayArticlesForFeed(currentDisplayingFeedUrl, currentFeed?.name, articlesCache[currentDisplayingFeedUrl]);
+                }
+            }
+        }
+
+        // --- Event Listeners ---
+        addFeedButton.addEventListener('click', addFeed);
+        rssUrlInput.addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                addFeed();
+            }
+        });
+        refreshAllButton.addEventListener('click', refreshAllFeeds);
+
+        // --- Initialization ---
+        document.addEventListener('DOMContentLoaded', () => {
+            loadFeedsFromLocalStorage();
+            loadArticlesFromCache();
+            renderFeeds();
+            if (feeds.length > 0) {
+                // Optionally display articles from the first feed or a "welcome" message
+                 articleListContainer.innerHTML = '<p class="text-gray-500 text-center py-10">请从左侧选择一个 RSS 源以查看文章，或点击刷新按钮获取最新内容。</p>';
+            }
+        });
+
+    </script>
+</body>
+</html>
